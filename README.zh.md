@@ -9,7 +9,7 @@
 **包名：** `@shengsheng/dsh-taskboard`  
 **仓库：** https://github.com/shengsheng90/DSH-taskboard  
 **许可证：** Apache-2.0  
-**Host 版本策略：** DSH 运行时 peer 为 `*`，不按版本号拦截安装。已验证 `0.1.6-alpha.1`、`0.1.7-rc.1/rc.2` 和 `0.2.0-rc.1/rc.2` 的安装与加载。
+**Host 版本策略：** DSH 运行时 peer 为 `*`，不按版本号拦截安装。已验证 `0.1.6-alpha.1`、`0.1.7-rc.1/rc.2` 和 `0.2.0-rc.1/rc.2` 的安装与加载。这些检查覆盖安装和模块加载；升级 Host 后仍需核对 GUI 操作和模型执行。
 
 ![原生任务板的看板、任务详情和工作流视图](docs/assets/taskboard-demo.gif)
 
@@ -36,7 +36,7 @@ Agent 只能把已验证工作提交到 `in_review`；只有经过认证的用�
 | 要求 | 取值 |
 |---|---|
 | Node.js | `^22.19.0` 或 `>=24.0.0`（推荐 24；使用内置 `node:sqlite`） |
-| pnpm | `11`（`packageManager` 为 `pnpm@11.15.1`） |
+| pnpm | 仓库开发使用 `11.15.1`（见 `packageManager`）；profile 安装使用 Harness 自带的 pnpm |
 | DeepSeek Harness | checkout 或安装，**web** profile；不限制 DSH 版本号 |
 | 网络 | 仅克隆本仓库和安装 Node 依赖时需要 |
 | 权限 | 可写 `$DSH_HOME`（默认 `~/.dsh`），并能重启 Harness 进程 |
@@ -76,6 +76,8 @@ lsof -p <PID> -a -d cwd
 ```
 
 若 `3080` 上没有监听，换其他常见端口，或向操作者确认正在使用的 URL（`http://127.0.0.1:<port>`）。
+
+将 `PORT` 设为实际监听端口，后续命令沿用该值。`DSH_HOME` 和 profile 也应与运行中的 Host 一致；示例使用 `web` profile。
 
 判定 `dsh` 的调用方式：
 
@@ -129,24 +131,26 @@ dsh --profile web --dump-config
 ### 5. 模块解析冒烟测试
 
 ```sh
-cd ~/.dsh/profiles/web && node --input-type=module -e \
-  "import('@shengsheng/dsh-taskboard').then(m=>console.log('OK', m.name, typeof m.apply)).catch(e=>{console.error(e.message);process.exit(1)})"
+(cd "${DSH_HOME:-$HOME/.dsh}/profiles/web" && node --input-type=module -e \
+  "import('@shengsheng/dsh-taskboard').then(m=>console.log('OK', m.name, typeof m.apply)).catch(e=>{console.error(e.message);process.exit(1)})")
 ```
 
 通过：`OK taskboard function`。
 
-失败多为找不到 peer（`@deepseek-ai/*` 或 `react`）。它们经 `~/.dsh/profiles/node_modules` 的安装回退链接解析，Harness 启动时会自动修复。先重做第 4 步，再重试本导入。
+失败多为找不到 peer（`@deepseek-ai/*` 或 `react`）。它们经 `$DSH_HOME/profiles/node_modules`（通常为 `~/.dsh/profiles/node_modules`）的安装回退链接解析，Harness 启动时会自动修复。先重做第 4 步，再重试本导入。
 
 ### 6. 判断当前进程是否已经加载插件
 
 插件组成和 client-modules 扫描**只在启动时**执行。装进 profile 不会热加载 UI。
 
+**升级或重新安装包后，即使以下两项检查通过，也必须按第 7 步重启 Harness。** manifest 只包含包名，不能证明运行中的 Host 已加载新构建。
+
 ```sh
-curl -s http://127.0.0.1:3080/ | grep -c '@shengsheng/dsh-taskboard'
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080/plugins/@shengsheng/dsh-taskboard/client.js
+curl -s "http://127.0.0.1:$PORT/" | grep -c '@shengsheng/dsh-taskboard'
+curl -s -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:$PORT/plugins/@shengsheng/dsh-taskboard/client.js"
 ```
 
-- manifest 计数 `> 0` **且** bundle HTTP `200` → 已激活，跳过重启，进入 [确认激活](#7-确认激活)。
+- manifest 计数 `> 0` **且** bundle HTTP `200`，且启动后未更换插件包 → 客户端产物已提供，跳过重启，进入 [确认激活](#8-确认激活)。
 - 否则必须重启 Harness。
 
 ### 7. 重启 Harness
@@ -157,7 +161,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080/plugins/@shengshe
 
 ```sh
 # 停掉当前监听
-OLD_PID=$(lsof -tiTCP:3080 -sTCP:LISTEN | head -1)
+OLD_PID=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN | head -1)
 if [ -n "$OLD_PID" ]; then kill -TERM "$OLD_PID"; fi
 
 # 等端口释放后，在 checkout 根目录重新启动
@@ -169,10 +173,10 @@ nohup pnpm dsh --profile web >> /tmp/dsh-harness-restart.log 2>&1 &
 
 ```sh
 for _ in $(seq 1 30); do
-  if curl -s http://127.0.0.1:3080/ | grep -q '@shengsheng/dsh-taskboard'; then echo ready; break; fi
+  if curl -s "http://127.0.0.1:$PORT/" | grep -q '@shengsheng/dsh-taskboard'; then echo ready; break; fi
   sleep 2
 done
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080/plugins/@shengsheng/dsh-taskboard/client.js
+curl -s -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:$PORT/plugins/@shengsheng/dsh-taskboard/client.js"
 ```
 
 一次真实安装用过的分离会话重启脚本见 [docs/install-plugin-prompt.zh.md](docs/install-plugin-prompt.zh.md) 第 6 步。若安装代理会随旧 Harness 进程组一起被杀掉，应使用该脚本。
@@ -187,6 +191,9 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080/plugins/@shengshe
 | `GET /plugins/@shengsheng/dsh-taskboard/client.js` | HTTP 200 |
 | Harness 启动日志 | 无插件 import / apply 错误 |
 | 浏览器 | 刷新 `http://127.0.0.1:<port>`，侧栏底部出现任务板入口 |
+| UI 写入 | 新建测试项目和任务，刷新后确认两者仍在 |
+
+页面加载成功还不足以证明写入通道正常。在浏览器开发者工具中，界面操作应向 `/taskboard/<endpoint>` 发出 POST，返回 `server-response` 且 `result.ok: true`。该通道沿用 Harness 的认证和 Origin 校验。`401` / `403` 应检查浏览器登录状态及 Host 访问配置；`404` 应检查路由是否挂载、代理路径是否正确。HTTP `200` 但 `result.ok: false` 仍表示应用错误，不能当作写入成功。自定义 RPC 调用必须发送 `client-request` 信封，包含字符串 `rpcId`、与 endpoint 一致的 `method`，以及 `payload`。
 
 默认数据文件（首次使用时由 Host 解析路径后创建）：
 
@@ -207,6 +214,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080/plugins/@shengshe
 | `incompatible with dsh` | 旧包仍声明有界的 DSH 版本范围 | 升级到 DSH peer 为 `*` 的新包；实际 API 错误仍需适配 |
 | 写 `~/.dsh` 报 `EPERM` | 沙箱限制 | 向操作者申请完整权限；该写作为幂等重写 |
 | manifest / `client.js` 仍 404 | 未重启，或验证过早 | 重启后按第 7 步轮询 |
+| 页面能打开，但新建/编辑失败 | RPC 路由、认证、代理或请求错误 | 按第 8 步检查 `/taskboard/<endpoint>` 请求及 `result.ok`；旧插件应升级后重启 |
 | 导入 / apply 报错 | peer 缺失或未进入 bundles | 用 `--dump-config` 修复回退链接；确认 `dsh.profile.bundles` |
 | `declares no dsh.bundle` | 包缺少 bundle patch | 重新构建本仓库，不要手改已安装树 |
 | 重启后 GUI 打不开 | Harness 启动失败 | 看 `/tmp/dsh-harness-restart.log` 或进程日志；确认 checkout 路径和 `pnpm dsh` |
@@ -224,7 +232,9 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080/plugins/@shengshe
 5. **批准开工** 把 `backlog` 变为 `todo`。Agent 和自动化只能认领符合条件的 `todo`。
 6. 按需使用 **看板**、**列表**、**甘特**、**工作流** 和概览。页面跟随 Harness 语言（中文或英文）。
 7. Agent 提交评审后，打开任务，阅读结果评论和验证证据，然后 **验收完成**（`done`）或 **退回修改**。
-8. 使用 **在新会话中打开** 前，先为项目映射 Workspace。该操作会打开原生空白 Session，并写入带有精确任务 id 与版本的未发送草稿。
+8. 使用 **在新会话中打开** 前，先为项目映射 Workspace。该按钮适用于 `todo` / `in_progress` 任务，会打开带有未发送任务草稿的原生 Session，同时建立绑定该 Session 的新认领，将 `todo` 推进到 `in_progress`；已有认领须先释放，才能绑定新会话。绑定会递增任务版本，因此写入前须重新读取任务。准备好后发送草稿，才会开始 Agent 回合。
+
+手动绑定和自动化创建的 Session 都会同步关联 Goal 的终态：`complete` 将任务提交到 `in_review`，`blocked` 将任务置为 `blocked`。进入 `done` 仍需人工验收。
 
 仅限人工（UI 或 CLI，模型工具没有这些能力）：批准、验收、退回、归档、恢复、取消、重新打开、强制接管、永久删除。
 
@@ -275,6 +285,8 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080/plugins/@shengshe
 
 CLI 输出带 schema 版本的 JSON。供人工脚本和互操作使用，不是模型的主 API。
 
+从其他目录操作 Host 的数据时，使用 Host 启动日志中的数据库和附件绝对路径。相对默认值可能选中另一个项目的库。请同时传入 `--database` 和 `--attachment-root`，或将 `DSH_TASKBOARD_DATABASE` 和 `DSH_TASKBOARD_ATTACHMENTS` 设为这两个绝对路径。
+
 ```sh
 dsh-taskboard --database .dsh/taskboard.sqlite project list
 dsh-taskboard --database .dsh/taskboard.sqlite project create --key DSH --name "我的项目"
@@ -299,12 +311,14 @@ dsh-taskboard task return --task task-... --version 4 --comment "修复失败的
 若 `PATH` 里没有该命令，直接跑已安装文件：
 
 ```sh
-node ~/.dsh/profiles/web/node_modules/@shengsheng/dsh-taskboard/lib/cli.js --database .dsh/taskboard.sqlite storage status
+node "${DSH_HOME:-$HOME/.dsh}/profiles/web/node_modules/@shengsheng/dsh-taskboard/lib/cli.js" --database .dsh/taskboard.sqlite storage status
 ```
 
 ### 自动化
 
 在任务板页面为项目新建自动化：间隔、Agent 预设、模型路由、工作器数量和配额策略。启用后，Host 调度器会认领合格 `todo`，驱动根 Agent Session 与 Goal，并停在 `in_review`。Harness 目前没有提供主动配额信号，因此插件会把配额状态视为“不确定”：新规则默认选择**忽略**；若明确选择**配额不确定时暂停**，则不会开始新认领，但不会取消已在跑的工作。
+
+表单会预填 Host 当前的模型和推理设置；`defaultModelRoute` 可覆盖表单中的默认模型。规则明确指定的模型路由优先于 Host 默认值。若规则没有指定路由，Host 也没有默认模型，工作器无法启动。
 
 为任务分配已保存工作流后，工作流的标签页、分支、节点类型和配置会作为**执行指引**加入 Agent 的任务指令。调度器不会自动调用工作流节点；`executable` 只表示 Host 为该节点类型注册了 provider，并不表示分配工作流会隐式运行节点。
 
@@ -312,7 +326,7 @@ node ~/.dsh/profiles/web/node_modules/@shengsheng/dsh-taskboard/lib/cli.js --dat
 
 `cordis.patch.yml` 挂载一个 Host 插件，id 为 `taskboard`。可在 profile 组成层或环境变量中覆盖。路径由 Host 解析，浏览器不能选择数据库或附件根目录。
 
-相对路径形式的 `databasePath` / `attachmentRoot` **不依赖进程 cwd**。两者一起解析到同一个基准目录，权威数据和附件字节不会落到不同的地方：
+相对路径形式的 `databasePath` / `attachmentRoot` 共用一个按以下规则选出的基准目录。启动 cwd 会参与选择；绝对路径则保持固定：
 
 1. `:memory:` 和绝对路径按原样使用。
 2. 若 cwd 相对路径上的数据库已经存在，就沿用该位置，之前建好的库不会被丢下。只有 `attachmentRoot` 是相对路径时，改由它来定这一步，绝对路径数据库指向的附件字节不会被孤立。
@@ -331,6 +345,7 @@ node ~/.dsh/profiles/web/node_modules/@shengsheng/dsh-taskboard/lib/cli.js --dat
 | `snapshotTaskLimit` | `1000` | 单次网页快照的任务数上限，被截断时页面会给出提示 |
 | `maxAttachmentBytes` | `26214400` | 单文件 25 MiB |
 | `maxTaskAttachmentBytes` | `104857600` | 单任务 100 MiB |
+| `allowedAttachmentTypes` | 见下方列表 | 允许上传的附件 MIME 类型 |
 | `minAutomationIntervalMs` | `30000` | 自动化间隔下限 |
 | `maxProjectWorkers` | `2` | 每项目并发认领 |
 | `maxGlobalWorkers` | `4` | 全局并发认领 |
@@ -339,8 +354,13 @@ node ~/.dsh/profiles/web/node_modules/@shengsheng/dsh-taskboard/lib/cli.js --dat
 | `maxChangeWaiters` | `128` | 长轮询等待上限 |
 | `maxChangeWatchMs` | `30000` | 长轮询超时 |
 | `defaultAgentPreset` | `standard` | 工作器预设 |
+| `defaultModelRoute` | 未设置 | 自动化表单默认模型，格式为 `provider:model` 或 `provider/model`；未设置时使用 Host 当前选择 |
 
-附件类型和大小在发布前校验。Dashboard 与 `storage status` 使用同一组有界 SQLite 完整性、revision、数量、附件清理队列和孤儿认领诊断。
+默认 `allowedAttachmentTypes`：`application/json`、`application/octet-stream`、`application/pdf`、`application/zip`、`image/gif`、`image/jpeg`、`image/png`、`image/webp`、`text/markdown`、`text/plain`。`allowedAttachmentTypes` 和 `defaultModelRoute` 在 profile 组成层设置；`cordis.patch.yml` 只映射了两个存储路径环境变量。
+
+附件类型和大小在发布前校验。Dashboard 与 `storage status` 使用同一组 SQLite 完整性结果，以及有界的 revision、数量、附件清理队列和孤儿认领诊断。
+
+SQLite 完整性扫描会读取整个数据库，因此不在 snapshot 路径执行，而是在数据库打开时和 Dashboard 主动复查时执行。`storageHealth.integrityCheckedAt` 表示当前完整性结果的检查时间。
 
 页面打开期间，插件通过现有 Typert 连接等待下一次已提交的全局 revision。超时轮询和周期 snapshot 是恢复路径。这不要求修改 Harness 的 Host 事件白名单。
 
@@ -367,7 +387,7 @@ dsh-taskboard --database <绝对路径> storage status
 ## 开发本仓库
 
 ```sh
-pnpm install
+pnpm install --frozen-lockfile
 pnpm typecheck
 pnpm test
 pnpm build
@@ -390,6 +410,7 @@ pnpm example
 | [docs/acceptance-audit.md](docs/acceptance-audit.md) | 逐项验收证据 |
 | [docs/browser-e2e.md](docs/browser-e2e.md) | 确定性浏览器生命周期 |
 | [docs/install-plugin-prompt.zh.md](docs/install-plugin-prompt.zh.md) | 给 Harness 代理的中文一键安装提示词 |
+| [docs/plugin-compatibility.zh.md](docs/plugin-compatibility.zh.md) | 分发策略、兼容矩阵与验证边界 |
 | [skills/manage-taskboard/SKILL.md](skills/manage-taskboard/SKILL.md) | Agent 操作规程 |
 
 ## 许可证
