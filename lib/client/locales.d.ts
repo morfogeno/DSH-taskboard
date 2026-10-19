@@ -36,6 +36,7 @@ declare const zh: {
     readonly addProject: "新建项目";
     readonly projectName: "项目名称";
     readonly projectKey: "项目代号";
+    readonly projectKeyRule: "项目代号须为 2–10 位字母或数字，并以字母开头。";
     readonly due: "截止";
     readonly recentTasks: "最近任务";
     readonly priority: "优先级";
@@ -251,6 +252,7 @@ export declare const taskboardLocales: {
         readonly addProject: "新建项目";
         readonly projectName: "项目名称";
         readonly projectKey: "项目代号";
+        readonly projectKeyRule: "项目代号须为 2–10 位字母或数字，并以字母开头。";
         readonly due: "截止";
         readonly recentTasks: "最近任务";
         readonly priority: "优先级";
@@ -465,6 +467,7 @@ export declare const taskboardLocales: {
         readonly addProject: "New project";
         readonly projectName: "Project name";
         readonly projectKey: "Project key";
+        readonly projectKeyRule: "A project key must be 2–10 letters or digits and start with a letter.";
         readonly due: "Due";
         readonly recentTasks: "Recent tasks";
         readonly priority: "Priority";

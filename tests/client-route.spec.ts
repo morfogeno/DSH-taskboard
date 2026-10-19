@@ -1,8 +1,20 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { applyAutomationDefaults, boardColumnOrder, BOARD_COLUMN_PAGE_SIZE, classifyRevisionChange, createdTaskId, decodeTaskboardHash, descriptionComposerMode, encodeTaskboardRoute, boardDropIntent, humanQuickCreateRequest, observeSnapshot, paginateBoardColumn, previewAutomationRuns, projectLabelCatalog, renderTaskSessionDraft, sortTaskList, restoreRecentProject, TaskboardClientController, tasksForLabel } from '../src/client/controller.js'
+import { applyAutomationDefaults, boardColumnOrder, BOARD_COLUMN_PAGE_SIZE, classifyRevisionChange, createdTaskId, decodeTaskboardHash, descriptionComposerMode, encodeTaskboardRoute, boardDropIntent, humanQuickCreateRequest, isProjectKey, observeSnapshot, paginateBoardColumn, previewAutomationRuns, projectLabelCatalog, renderTaskSessionDraft, sortTaskList, restoreRecentProject, suggestProjectKey, TaskboardClientController, tasksForLabel } from '../src/client/controller.js'
 import { openTaskSession, taskboardStrings } from '../src/client/index.js'
 import { bindTaskboardLocale, currentTaskboardLanguage, formatAutomationLog, priorityLabel } from '../src/client/locales.js'
+
+test('suggested project keys follow the whole name and stay server-valid', () => {
+  assert.equal(suggestProjectKey('S'), '')
+  assert.equal(suggestProjectKey('Sample'), 'SAMPLE')
+  assert.equal(suggestProjectKey('DSH taskboard'), 'DSHTAS')
+  assert.equal(suggestProjectKey('1Sample'), '')
+  assert.equal(suggestProjectKey('任务板'), '')
+  assert.equal(isProjectKey('S'), false)
+  assert.equal(isProjectKey('SA'), true)
+  assert.equal(isProjectKey('SAMPLETOOL'), true)
+  assert.equal(isProjectKey('ABCDEFGHIJK'), false)
+})
 
 test('Taskboard deep links preserve project, view, and task identity', () => {
   const route = { open: true, projectId: 'project/a', view: 'gantt' as const, taskId: 'task 42' }

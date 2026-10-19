@@ -37,6 +37,9 @@ export declare function paginateBoardColumn<T extends BoardOrderedTask>(tasks: r
 export declare function boardDropSortOrder(column: readonly BoardOrderedTask[], draggedId: string, target?: {
     readonly id: string;
 }): number | undefined;
+export declare function isProjectKey(value: string): boolean;
+/** A key the server will accept, taken from the current name. Too short or digit-leading names yield ''. */
+export declare function suggestProjectKey(name: string): string;
 /** Human quick-add from the web form: land in Backlog so drafts are not claimed. */
 export declare function humanQuickCreateRequest(projectId: string, title: string): {
     readonly projectId: string;
