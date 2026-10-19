@@ -80,6 +80,19 @@ export function boardDropSortOrder(
   return above === undefined ? below.sortOrder + BOARD_ORDER_STEP : (above.sortOrder + below.sortOrder) / 2
 }
 
+/** Server rule: 2–10 uppercase letters or digits, starting with a letter. */
+const PROJECT_KEY_PATTERN = /^[A-Z][A-Z0-9]{1,9}$/
+
+export function isProjectKey(value: string): boolean {
+  return PROJECT_KEY_PATTERN.test(value)
+}
+
+/** A key the server will accept, taken from the current name. Too short or digit-leading names yield ''. */
+export function suggestProjectKey(name: string): string {
+  const compact = name.replaceAll(/[^A-Za-z0-9]/g, '').slice(0, 6).toUpperCase()
+  return isProjectKey(compact) ? compact : ''
+}
+
 /** Human quick-add from the web form: land in Backlog so drafts are not claimed. */
 export function humanQuickCreateRequest(projectId: string, title: string): {
   readonly projectId: string

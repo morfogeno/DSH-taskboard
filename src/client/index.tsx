@@ -14,7 +14,7 @@ import type { TaskboardSnapshot } from '../service/index.js'
 import {
   addWorkflowTab, copyWorkflowNode, insertWorkflowNode, moveWorkflowNode, removeWorkflowNode, removeWorkflowTab,
 } from '../workflow/index.js'
-import { applyAutomationDefaults, BOARD_COLUMN_PAGE_SIZE, boardDropIntent, createdTaskId, descriptionComposerMode, humanQuickCreateRequest, isPreviewableAttachment, observeSnapshot, paginateBoardColumn, previewAutomationRuns, projectLabelCatalog, sortTaskList, TaskboardClientController, tasksForLabel, type TaskboardConnection, type TaskListSortKey } from './controller.js'
+import { applyAutomationDefaults, BOARD_COLUMN_PAGE_SIZE, boardDropIntent, createdTaskId, descriptionComposerMode, humanQuickCreateRequest, isPreviewableAttachment, isProjectKey, observeSnapshot, paginateBoardColumn, previewAutomationRuns, projectLabelCatalog, sortTaskList, suggestProjectKey, TaskboardClientController, tasksForLabel, type TaskboardConnection, type TaskListSortKey } from './controller.js'
 import { PopoverShell, useExclusivePopover } from './popover.js'
 import { applyMarkdownEdit, parseMarkdown, type MarkdownBlock, type MarkdownEditAction, type MarkdownInline } from './markdown.js'
 import {
@@ -490,10 +490,10 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
     if (detailDirty.current) setDiscardPrompt(true)
     else closeDetail()
   }
-  const mutate = async (endpoint: string, payload: Record<string, unknown>): Promise<unknown> => {
+  const commitMutation = async (endpoint: string, payload: Record<string, unknown>): Promise<{ ok: true; value: unknown } | { ok: false }> => {
     // One in-flight write at a time. Without this a double-click either creates a duplicate task
     // (task.create carries no expected version) or fails the second attempt on a stale version.
-    if (inFlight.current) return undefined
+    if (inFlight.current) return { ok: false }
     inFlight.current = true
     setBusy(true)
     try {
@@ -520,15 +520,19 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
         })
       }
       setError(undefined); refresh()
-      return value
+      return { ok: true, value }
     }
     catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause)
       setError(message)
       if (message.includes('TASK_STALE_VERSION')) refresh()
-      return undefined
+      return { ok: false }
     }
     finally { inFlight.current = false; setBusy(false) }
+  }
+  const mutate = async (endpoint: string, payload: Record<string, unknown>): Promise<unknown> => {
+    const result = await commitMutation(endpoint, payload)
+    return result.ok ? result.value : undefined
   }
   const performUndo = async (): Promise<void> => {
     if (undo === undefined || inFlight.current) return
@@ -555,8 +559,8 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
           {selected === undefined && <option value="">{snapshot === undefined ? t.loading : t.noProject}</option>}
           {snapshot?.projects.map(project => <option key={project.id} value={project.id}>{project.key} · {project.name}</option>)}
         </select>
-        <ProjectCreate controller={controller} refresh={refresh} workspaces={workspaceState.items} />
-        {selected !== undefined && <ProjectActions project={selected} controller={controller} refresh={refresh} workspaces={workspaceState.items} />}
+        <ProjectCreate controller={controller} commit={commitMutation} workspaces={workspaceState.items} />
+        {selected !== undefined && <ProjectActions project={selected} controller={controller} commit={commitMutation} workspaces={workspaceState.items} />}
         <button type="button" onClick={refresh}>{t.refresh}</button>
         {selected !== undefined && <AutomationActions project={selected} automations={snapshot?.automations ?? []} defaults={snapshot?.automationDefaults} mutate={mutate} />}
         <button type="button" className="dsh-taskboard-icon-close" aria-label={t.close} onClick={() => { controller.close() }}><CloseIcon size={14} /></button>
@@ -581,7 +585,7 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
         : <div className="dsh-taskboard-content">
           <main className="dsh-taskboard-view">
             {selected === undefined
-              ? <div className="dsh-taskboard-empty"><p>{t.noProject}</p><ProjectCreate controller={controller} refresh={refresh} workspaces={workspaceState.items} /></div>
+              ? <div className="dsh-taskboard-empty"><p>{t.noProject}</p><ProjectCreate controller={controller} commit={commitMutation} workspaces={workspaceState.items} /></div>
               : <>
                 <TaskCreate project={selected} mutate={mutate} onCreated={taskId => { controller.select(selected.id, route.view, taskId) }} />
                 {route.view === 'dashboard' && <Dashboard tasks={visibleTasks} runs={snapshot?.automationRuns ?? []} project={selected} storage={snapshot?.storageHealth} open={task => { controller.select(selected?.id, route.view, task.id) }} openLog={() => { setLogOpen(true) }} mutate={mutate} />}
@@ -609,41 +613,49 @@ export function TaskboardPage({ controller, workspaces }: PageProps) {
   )
 }
 
-function ProjectCreate({ controller, refresh, workspaces }: {
+function ProjectCreate({ controller, commit, workspaces }: {
   controller: TaskboardClientController
-  refresh: () => void
+  commit: (endpoint: string, payload: Record<string, unknown>) => Promise<{ ok: true; value: unknown } | { ok: false }>
   workspaces: readonly WorkspaceOption[]
 }) {
   const t = useStrings()
+  const keyHintId = useId()
   const popover = useExclusivePopover()
   const [name, setName] = useState('')
   const [key, setKey] = useState('')
+  /** A hand-edited key stays put. Reading `key === ''` instead locked the suggestion on the first letter. */
+  const [keyEdited, setKeyEdited] = useState(false)
   const [workspaceId, setWorkspaceId] = useState('')
   const [labels, setLabels] = useState('')
+  const projectKey = key.trim()
+  const showKeyHint = name.trim() !== '' && !isProjectKey(projectKey)
   const close = (): void => { popover.setOpen(false) }
   const create = async (event: FormEvent): Promise<void> => {
     event.preventDefault()
-    if (name.trim() === '' || key.trim() === '') return
-    const project = await controller.mutate('project.create', {
+    if (name.trim() === '' || !isProjectKey(projectKey)) return
+    const result = await commit('project.create', {
       request: {
-        key: key.trim(), name: name.trim(),
+        key: projectKey, name: name.trim(),
         ...(workspaceId.trim() === '' ? {} : { workspaceId: workspaceId.trim() }),
         labels: labels.split(',').map(value => value.trim()).filter(Boolean),
       },
-    }) as TaskboardProject
-    close(); setName(''); setKey(''); setWorkspaceId(''); setLabels('')
-    controller.select(project.id, 'board')
-    refresh()
+    })
+    if (!result.ok || typeof result.value !== 'object' || result.value === null) return
+    const projectId = (result.value as { id?: unknown }).id
+    if (typeof projectId !== 'string' || projectId === '') return
+    close(); setName(''); setKey(''); setKeyEdited(false); setWorkspaceId(''); setLabels('')
+    controller.select(projectId, 'board')
   }
   return (
     <PopoverShell open={popover.open} onToggle={popover.toggle} onDismiss={close} label={`＋ ${t.addProject}`}>
       <form onSubmit={event => { void create(event) }}>
-        <label>{t.projectName}<input autoFocus value={name} onChange={event => { const value = event.target.value; setName(value); if (key === '') setKey(value.replaceAll(/[^A-Za-z0-9]/g, '').slice(0, 6).toUpperCase()) }} /></label>
-        <label>{t.projectKey}<input value={key} onChange={event => { setKey(event.target.value.toUpperCase()) }} /></label>
+        <label>{t.projectName}<input autoFocus value={name} onChange={event => { const value = event.target.value; setName(value); if (!keyEdited) setKey(suggestProjectKey(value)) }} /></label>
+        <label>{t.projectKey}<input value={key} aria-invalid={showKeyHint} aria-describedby={showKeyHint ? keyHintId : undefined} onChange={event => { setKeyEdited(true); setKey(event.target.value.toUpperCase().replaceAll(/[^A-Z0-9]/g, '').slice(0, 10)) }} /></label>
+        {showKeyHint && <p id={keyHintId} className="dsh-taskboard-field-hint">{t.projectKeyRule}</p>}
         <label>{t.workspaceId}<select value={workspaceId} onChange={event => { setWorkspaceId(event.target.value) }}><option value="">{t.blankGlobal}</option>{workspaces.map(item => <option key={item.workspaceId} value={item.workspaceId}>{item.title} · {item.path}</option>)}</select></label>
         <label>{t.labels}<input value={labels} onChange={event => { setLabels(event.target.value) }} placeholder="local, release" /></label>
         <div>
-          <button type="submit" disabled={name.trim() === '' || key.trim() === ''}>{t.create}</button>
+          <button type="submit" disabled={name.trim() === '' || !isProjectKey(projectKey)}>{t.create}</button>
           <button type="button" onClick={close}>{t.cancel}</button>
         </div>
       </form>
@@ -651,10 +663,10 @@ function ProjectCreate({ controller, refresh, workspaces }: {
   )
 }
 
-function ProjectActions({ project, controller, refresh, workspaces }: {
+function ProjectActions({ project, controller, commit, workspaces }: {
   project: TaskboardProject
   controller: TaskboardClientController
-  refresh: () => void
+  commit: (endpoint: string, payload: Record<string, unknown>) => Promise<{ ok: true; value: unknown } | { ok: false }>
   workspaces: readonly WorkspaceOption[]
 }) {
   const t = useStrings()
@@ -667,19 +679,19 @@ function ProjectActions({ project, controller, refresh, workspaces }: {
   const edit = async (event: FormEvent): Promise<void> => {
     event.preventDefault()
     if (name.trim() === '') return
-    await controller.mutate('project.update', {
+    const result = await commit('project.update', {
       projectId: project.id,
       expectedVersion: project.version,
       request: { name: name.trim(), workspaceId: workspace.trim() || null, labels: labels.split(',').map(value => value.trim()).filter(Boolean) },
     })
+    if (!result.ok) return
     editPopover.setOpen(false)
-    refresh()
   }
   const remove = async (): Promise<void> => {
-    await controller.mutate('project.delete', { projectId: project.id, expectedVersion: project.version })
+    const result = await commit('project.delete', { projectId: project.id, expectedVersion: project.version })
+    if (!result.ok) return
     deletePopover.setOpen(false)
     controller.select(undefined, 'dashboard')
-    refresh()
   }
   return (
     <>
@@ -1664,7 +1676,7 @@ html[data-platform=darwin]:not([data-fullscreen]) .dsh-taskboard-page{top:var(--
 .dsh-taskboard-workflow-node-actions{display:flex;flex-wrap:wrap;gap:4px;margin-top:7px}.dsh-taskboard-workflow-node-actions button{padding:2px 8px;min-height:22px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:11px;background:transparent;font-size:11px}
 .dsh-taskboard-capabilities{margin-top:14px;padding-top:10px;border-top:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.04))}.dsh-taskboard-capabilities h3{margin:0 0 5px;font-weight:500}.dsh-taskboard-capabilities>div{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}
 .dsh-taskboard-markdown{overflow-wrap:anywhere}.dsh-taskboard-markdown h1,.dsh-taskboard-markdown h2,.dsh-taskboard-markdown h3,.dsh-taskboard-markdown h4{margin:16px 0 8px;font-weight:600;line-height:1.35}.dsh-taskboard-markdown h1:first-child,.dsh-taskboard-markdown h2:first-child,.dsh-taskboard-markdown h3:first-child,.dsh-taskboard-markdown h4:first-child{margin-top:0}.dsh-taskboard-markdown h1{font-size:22px;line-height:30px}.dsh-taskboard-markdown h2{font-size:18px;line-height:26px}.dsh-taskboard-markdown h3{font-size:16px;line-height:24px}.dsh-taskboard-markdown h4{font-size:14px;line-height:22px}.dsh-taskboard-markdown p{margin:0 0 8px;white-space:pre-wrap}.dsh-taskboard-markdown p:last-child{margin-bottom:0}.dsh-taskboard-markdown ul,.dsh-taskboard-markdown ol{margin:0 0 8px;padding-left:1.4em}.dsh-taskboard-markdown li{margin:2px 0;white-space:pre-wrap}.dsh-taskboard-markdown blockquote{margin:0 0 8px;padding:0 12px;border-left:3px solid var(--dsw-alias-border-l3,rgba(0,0,0,.12));color:var(--dsw-alias-label-secondary,#61666b)}.dsh-taskboard-markdown a{color:var(--dsw-alias-state-business-primary,#4176e6)}.dsh-taskboard-markdown img{display:block;max-width:100%;height:auto;margin:8px 0;border-radius:8px}.dsh-taskboard-markdown code{padding:1px 5px;border-radius:4px;background:var(--dsw-alias-markdown-code-block,#f9fafb);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}.dsh-taskboard-markdown pre{overflow:auto;padding:8px;border-radius:8px;background:var(--dsw-alias-markdown-code-block,#f9fafb)}.dsh-taskboard-markdown pre code{padding:0;background:transparent}.dsh-taskboard-markdown hr{border:0;border-top:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));margin:12px 0}
-.dsh-taskboard-popover{position:relative}.dsh-taskboard-popover>form,.dsh-taskboard-confirm{position:absolute;top:calc(100% + 6px);right:0;z-index:12;display:flex;flex-direction:column;gap:8px;width:280px;padding:12px;border:1px solid var(--dsw-alias-border-inverted,transparent);border-radius:12px;background:var(--dsw-specific-menu,#fff);box-shadow:var(--dsw-shadow-lv3,0 12px 32px rgba(0,0,0,.08))}.dsh-taskboard-popover form label{display:flex;flex-direction:column;gap:4px}.dsh-taskboard-popover form div,.dsh-taskboard-inline-form{display:flex;gap:7px}.dsh-taskboard-confirm{position:relative;top:auto;right:auto;width:auto;margin:8px 0}.dsh-taskboard-popover>.dsh-taskboard-confirm{position:absolute;top:calc(100% + 6px);right:0;z-index:12;width:280px;margin:0}.dsh-taskboard-reason{padding:12px;border:1px solid var(--dsw-alias-state-warn-primary,#f59e0b);border-radius:12px;background:var(--dsw-alias-state-warn-tertiary,#fef5e7)}.dsh-taskboard-reason label{display:flex;flex-direction:column;gap:6px}.dsh-taskboard-relation-create{display:grid;grid-template-columns:1fr;gap:6px}.dsh-taskboard-inline-form{align-items:end;padding:10px 0}.dsh-taskboard-inline-form label{display:flex;flex-direction:column;gap:4px}.dsh-taskboard-workflow-create{display:flex;flex-direction:column;gap:5px}.dsh-taskboard-workflow-create input{min-width:0}
+.dsh-taskboard-popover{position:relative}.dsh-taskboard-popover>form,.dsh-taskboard-confirm{position:absolute;top:calc(100% + 6px);right:0;z-index:12;display:flex;flex-direction:column;gap:8px;width:280px;padding:12px;border:1px solid var(--dsw-alias-border-inverted,transparent);border-radius:12px;background:var(--dsw-specific-menu,#fff);box-shadow:var(--dsw-shadow-lv3,0 12px 32px rgba(0,0,0,.08))}.dsh-taskboard-popover form label{display:flex;flex-direction:column;gap:4px}.dsh-taskboard-field-hint{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary,#ec1313)}.dsh-taskboard-popover form div,.dsh-taskboard-inline-form{display:flex;gap:7px}.dsh-taskboard-confirm{position:relative;top:auto;right:auto;width:auto;margin:8px 0}.dsh-taskboard-popover>.dsh-taskboard-confirm{position:absolute;top:calc(100% + 6px);right:0;z-index:12;width:280px;margin:0}.dsh-taskboard-reason{padding:12px;border:1px solid var(--dsw-alias-state-warn-primary,#f59e0b);border-radius:12px;background:var(--dsw-alias-state-warn-tertiary,#fef5e7)}.dsh-taskboard-reason label{display:flex;flex-direction:column;gap:6px}.dsh-taskboard-relation-create{display:grid;grid-template-columns:1fr;gap:6px}.dsh-taskboard-inline-form{align-items:end;padding:10px 0}.dsh-taskboard-inline-form label{display:flex;flex-direction:column;gap:4px}.dsh-taskboard-workflow-create{display:flex;flex-direction:column;gap:5px}.dsh-taskboard-workflow-create input{min-width:0}
 .dsh-taskboard-summary,.dsh-taskboard-due{display:flex;flex-direction:column;gap:6px;margin-top:14px;padding:14px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:12px}.dsh-taskboard-summary h2,.dsh-taskboard-due h2{margin:0;font-size:16px;line-height:24px;font-weight:500}.dsh-taskboard-due button{display:flex;justify-content:space-between;gap:12px;padding:8px;border:0;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));border-radius:0;background:transparent;text-align:left;min-height:0}.dsh-taskboard-automation-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;flex:1 0 100%;padding:10px 0}.dsh-taskboard-automation-form label{display:flex;flex-direction:column;gap:4px}.dsh-taskboard-automation-form label:has(input[type="checkbox"]){flex-direction:row;align-items:center}
 @media(max-width:900px){.dsh-taskboard-dashboard{grid-template-columns:repeat(2,1fr)}.dsh-taskboard-board{grid-auto-flow:row;grid-auto-columns:auto;grid-template-columns:1fr;overflow-x:visible}.dsh-taskboard-dialog-backdrop{padding:12px}.dsh-taskboard-detail{height:min(100%,calc(100vh - 24px));border-radius:16px}.dsh-taskboard-detail-columns{grid-template-columns:1fr}.dsh-taskboard-detail-side{border-left:0;border-top:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1))}.dsh-taskboard-header{gap:5px}.dsh-taskboard-gantt button{grid-template-columns:1fr}}
 @media(prefers-reduced-motion:reduce){.dsh-taskboard-page *{scroll-behavior:auto!important;transition:none!important}}
